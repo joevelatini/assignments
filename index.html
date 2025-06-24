@@ -1,464 +1,263 @@
-import React, { useState, useEffect } from 'react';
-import { Download, AlertCircle } from 'lucide-react';
-import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
-
-const CSMAssignmentTool = () => {
-  const [assignments, setAssignments] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [csmWorkload, setCsmWorkload] = useState({});
-  const [stats, setStats] = useState({
-    total: 0,
-    reassigned: 0,
-    mustKeep: 0,
-    newCount: 0,
-    currentCount: 0,
-    requestedCount: 0
-  });
-
-  useEffect(() => {
-    loadAndProcessData();
-  }, []);
-
-  const parseARR = (arrString) => {
-    if (!arrString) return 0;
-    const cleaned = arrString.toString().replace(/[$,]/g, '').trim();
-    return parseFloat(cleaned) || 0;
-  };
-
-  const getEligibleCSMs = (arr, segment) => {
-    // Check segment - handle variations in naming
-    const normalizedSegment = segment ? segment.toLowerCase() : '';
-    const isMidMarket = normalizedSegment.includes('mid-market') || normalizedSegment.includes('mid market');
-    const isT1SMB = normalizedSegment.includes('t1.smb') || normalizedSegment.includes('t1 smb');
-    const isT2SMB = normalizedSegment.includes('t2.smb') || normalizedSegment.includes('t2 smb');
-    const isVSB = normalizedSegment.includes('very small') || normalizedSegment.includes('vsb');
-    const isSMB = normalizedSegment.includes('smb');
-    
-    if (isMidMarket || isT1SMB || (isSMB && !isT2SMB && !isVSB)) {
-      if (arr >= 100000) return ['Jeremy Walker', 'Harris Rollo'];
-      if (arr >= 50000) return ['Leslie', 'Laura'];
-      if (arr >= 20000) return ['Joe', 'Megan', 'Kristin'];
-    } else if (isT2SMB || isVSB) {
-      if (arr >= 20000) return ['Carly Blair', 'New Hire'];
-    }
-    
-    // Default for unmatched segments
-    if (arr >= 100000) return ['Jeremy Walker', 'Harris Rollo'];
-    if (arr >= 50000) return ['Leslie', 'Laura'];
-    if (arr >= 20000) return ['Joe', 'Megan', 'Kristin', 'Carly Blair', 'New Hire'];
-    
-    return [];
-  };
-
-  const loadAndProcessData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      
-      // Read all files
-      const [newAssignmentsData, currentAssignmentsData, requestedData] = await Promise.all([
-        window.fs.readFile('New Assignments Required.csv', { encoding: 'utf8' }),
-        window.fs.readFile('Current AssignmentsJune 24 2025.csv', { encoding: 'utf8' }),
-        window.fs.readFile('Requested Accounts to Keep.xlsx')
-      ]);
-
-      // Parse CSV files
-      const newAssignments = Papa.parse(newAssignmentsData, {
-        header: true,
-        dynamicTyping: true,
-        skipEmptyLines: true
-      });
-
-      const currentAssignments = Papa.parse(currentAssignmentsData, {
-        header: true,
-        dynamicTyping: true,
-        skipEmptyLines: true
-      });
-
-      // Parse Excel file
-      const workbook = XLSX.read(requestedData);
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const requestedAccounts = XLSX.utils.sheet_to_json(sheet);
-
-      // Create must-keep map from requested accounts
-      const mustKeepMap = {};
-      const requestedMap = {};
-      
-      requestedAccounts.forEach(account => {
-        const accountName = account['Account Name'];
-        if (accountName) {
-          // Store CSM preference
-          requestedMap[accountName] = account['CSM Name'] ? account['CSM Name'].trim() : '';
-          
-          // Mark as must-keep if Manager Perspective is Yes
-          if (account['Manager Perspective'] === 'Yes') {
-            mustKeepMap[accountName] = account['CSM Name'] ? account['CSM Name'].trim() : '';
-          }
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSM Account Assignments Downloader</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
         }
-      });
-
-      // Create current assignment map
-      const currentAssignmentMap = {};
-      currentAssignments.data.forEach(account => {
-        if (account.Name) {
-          currentAssignmentMap[account.Name] = {
-            owner: account.Owner || 'Unassigned',
-            arr: account.ARR,
-            segment: account['Employee Count Segment'] || ''
-          };
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
-      });
-
-      // Initialize CSM workload tracking
-      const workload = {};
-      const allCSMs = ['Jeremy Walker', 'Harris Rollo', 'Leslie', 'Laura', 'Joe', 'Megan', 'Kristin', 'Carly Blair', 'New Hire'];
-      allCSMs.forEach(csm => {
-        workload[csm] = { 
-          count: 0, 
-          totalARR: 0, 
-          byCategory: {'$100K+': 0, '$50K-$100K': 0, '$20K-$50K': 0, '<$20K': 0} 
-        };
-      });
-
-      // Process all new assignments
-      const processedAssignments = [];
-      let reassignedCount = 0;
-      let mustKeepCount = 0;
-
-      newAssignments.data.forEach(account => {
-        if (!account.Name) return;
-        
-        const accountName = account.Name;
-        const arr = parseARR(account.ARR);
-        const segment = account['Employee Count Segment'] || '';
-        const currentCSM = account.Owner || 'Unassigned';
-        
-        // Determine ARR category
-        let category = '';
-        if (arr >= 100000) category = '$100K+';
-        else if (arr >= 50000) category = '$50K-$100K';
-        else if (arr >= 20000) category = '$20K-$50K';
-        else category = '<$20K';
-        
-        // Check if this is a must-keep account
-        const isMustKeep = mustKeepMap.hasOwnProperty(accountName);
-        const isRequested = requestedMap.hasOwnProperty(accountName);
-        
-        let newCSM = currentCSM;
-        let changed = false;
-        
-        if (isMustKeep) {
-          // Must keep with specified CSM
-          mustKeepCount++;
-          newCSM = mustKeepMap[accountName];
-          changed = (currentCSM !== newCSM);
-        } else if (isRequested && requestedMap[accountName] && currentCSM === requestedMap[accountName]) {
-          // Keep with current CSM if they requested it
-          newCSM = currentCSM;
-          changed = false;
-        } else {
-          // Apply assignment rules
-          const eligibleCSMs = getEligibleCSMs(arr, segment);
-          
-          if (eligibleCSMs.length > 0) {
-            // Normalize current CSM name for comparison
-            const normalizedCurrent = currentCSM === 'Carly Blair' ? 'Carly Blair' : currentCSM;
-            
-            if (eligibleCSMs.includes(normalizedCurrent)) {
-              newCSM = currentCSM;
-            } else {
-              // Find CSM with lowest workload in this category
-              let minCount = Infinity;
-              eligibleCSMs.forEach(csm => {
-                const csmWorkloadCount = workload[csm]?.byCategory[category] || 0;
-                if (csmWorkloadCount < minCount) {
-                  minCount = csmWorkloadCount;
-                  newCSM = csm;
-                }
-              });
-              changed = true;
-            }
-          }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
         }
-        
-        if (changed) reassignedCount++;
-        
-        // Update workload
-        if (newCSM !== 'Unassigned' && workload[newCSM]) {
-          workload[newCSM].count++;
-          workload[newCSM].totalARR += arr;
-          workload[newCSM].byCategory[category]++;
+        .stats {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 6px;
+            margin-bottom: 30px;
         }
+        .stat-item {
+            margin: 10px 0;
+            font-size: 16px;
+        }
+        .stat-label {
+            font-weight: bold;
+            color: #555;
+        }
+        .download-btn {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 30px;
+            font-size: 18px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 20px 0;
+        }
+        .download-btn:hover {
+            background-color: #0056b3;
+        }
+        .preview {
+            margin-top: 30px;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        th, td {
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f8f9fa;
+            font-weight: bold;
+            position: sticky;
+            top: 0;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        .change-yes {
+            background-color: #fff3cd;
+        }
+        .must-keep {
+            background-color: #d1ecf1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>CSM Account Assignment Tool</h1>
         
-        processedAssignments.push({
-          accountName,
-          arr: account.ARR || '$0',
-          arrValue: arr,
-          segment,
-          category,
-          currentCSM,
-          newCSM,
-          changed,
-          mustKeep: isMustKeep
-        });
-      });
-
-      // Sort by ARR value (descending)
-      processedAssignments.sort((a, b) => b.arrValue - a.arrValue);
-
-      setAssignments(processedAssignments);
-      setCsmWorkload(workload);
-      setStats({
-        total: processedAssignments.length,
-        reassigned: reassignedCount,
-        mustKeep: mustKeepCount,
-        newCount: newAssignments.data.length,
-        currentCount: currentAssignments.data.length,
-        requestedCount: requestedAccounts.length
-      });
-      setLoading(false);
-    } catch (err) {
-      console.error('Error:', err);
-      setError(err.message || 'Failed to load data');
-      setLoading(false);
-    }
-  };
-
-  const downloadCSV = () => {
-    try {
-      // Create CSV data
-      const headers = ['Account Name', 'ARR', 'Segment', 'Category', 'Current CSM', 'New CSM', 'Changed', 'Must Keep'];
-      const rows = assignments.map(a => [
-        a.accountName,
-        a.arr,
-        a.segment,
-        a.category,
-        a.currentCSM,
-        a.newCSM,
-        a.changed ? 'Yes' : 'No',
-        a.mustKeep ? 'Yes' : 'No'
-      ]);
-
-      const csvContent = [headers, ...rows].map(row => 
-        row.map(cell => {
-          // Escape quotes and wrap in quotes if contains comma
-          const cellStr = String(cell || '');
-          if (cellStr.includes(',') || cellStr.includes('"') || cellStr.includes('\n')) {
-            return `"${cellStr.replace(/"/g, '""')}"`;
-          }
-          return cellStr;
-        }).join(',')
-      ).join('\n');
-
-      // Create and trigger download
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const link = document.createElement('a');
-      const url = URL.createObjectURL(blob);
-      
-      link.setAttribute('href', url);
-      link.setAttribute('download', `CSM_Assignments_${new Date().toISOString().split('T')[0]}.csv`);
-      link.style.visibility = 'hidden';
-      
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      
-      // Clean up
-      setTimeout(() => URL.revokeObjectURL(url), 100);
-    } catch (err) {
-      console.error('Download error:', err);
-      alert('Failed to download CSV. Please try again.');
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-gray-50">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading assignment data...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-gray-50">
-        <div className="text-center">
-          <AlertCircle className="w-12 h-12 mx-auto mb-4 text-red-600" />
-          <p className="text-red-600 font-medium">Error loading data</p>
-          <p className="text-gray-600 mt-2">{error}</p>
-          <button 
-            onClick={loadAndProcessData}
-            className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-          >
-            Try Again
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <div className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center">
-              {/* ActivTrak Logo */}
-              <svg className="h-8 w-8 mr-3" viewBox="0 0 100 100">
-                <path d="M20 70 L50 20 L80 70 Z" fill="#1E40AF" />
-                <path d="M35 55 L50 35 L65 55 Z" fill="#10B981" />
-                <path d="M42 48 L50 38 L58 48 Z" fill="#1F2937" />
-              </svg>
-              <h1 className="text-xl font-semibold text-gray-900">CSM Assignment Tool</h1>
+        <div class="stats">
+            <h2>Assignment Summary</h2>
+            <div class="stat-item">
+                <span class="stat-label">Total Accounts:</span> <span id="total">0</span>
             </div>
-            <button
-              onClick={downloadCSV}
-              className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
-            >
-              <Download className="w-4 h-4 mr-2" />
-              Download CSV
-            </button>
-          </div>
+            <div class="stat-item">
+                <span class="stat-label">Accounts Requiring Reassignment:</span> <span id="changes">0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Must Keep Accounts:</span> <span id="mustkeep">0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">No Change Required:</span> <span id="nochange">0</span>
+            </div>
         </div>
-      </div>
-
-      {/* Summary Stats */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <div className="bg-white rounded-lg shadow p-4">
-            <p className="text-sm text-gray-600">Total Accounts</p>
-            <p className="text-2xl font-bold text-gray-900">{stats.total}</p>
-          </div>
-          <div className="bg-white rounded-lg shadow p-4">
-            <p className="text-sm text-gray-600">Reassignments</p>
-            <p className="text-2xl font-bold text-yellow-600">{stats.reassigned}</p>
-          </div>
-          <div className="bg-white rounded-lg shadow p-4">
-            <p className="text-sm text-gray-600">Must Keep Accounts</p>
-            <p className="text-2xl font-bold text-red-600">{stats.mustKeep}</p>
-          </div>
-          <div className="bg-white rounded-lg shadow p-4">
-            <p className="text-sm text-gray-600">Files Processed</p>
-            <p className="text-xs text-gray-900">New: {stats.newCount}</p>
-            <p className="text-xs text-gray-900">Current: {stats.currentCount}</p>
-            <p className="text-xs text-gray-900">Requested: {stats.requestedCount}</p>
-          </div>
-        </div>
-
-        {/* Assignment Table */}
-        <div className="bg-white rounded-lg shadow overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Account Name
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    ARR
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Segment
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Category
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Current CSM
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    New CSM
-                  </th>
-                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Changed
-                  </th>
-                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Must Keep
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {assignments.map((assignment, index) => (
-                  <tr key={index} className={assignment.changed ? 'bg-yellow-50' : ''}>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                      {assignment.accountName}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {assignment.arr}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {assignment.segment}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <span className="px-2 py-1 text-xs rounded-full bg-gray-100">
-                        {assignment.category}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {assignment.currentCSM}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                      {assignment.newCSM}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-center">
-                      {assignment.changed ? (
-                        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-                          Yes
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                          No
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-center">
-                      {assignment.mustKeep ? (
-                        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                          Yes
-                        </span>
-                      ) : (
-                        <span className="text-gray-400">No</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
+        
+        <button class="download-btn" onclick="downloadCSV()">Download Complete CSV File (All 743 Accounts)</button>
+        
+        <div class="preview">
+            <h3>Preview (First 50 accounts)</h3>
+            <table id="preview-table">
+                <thead>
+                    <tr>
+                        <th>Account Name</th>
+                        <th>ARR</th>
+                        <th>Category</th>
+                        <th>Current CSM</th>
+                        <th>New CSM</th>
+                        <th>Change Required</th>
+                        <th>Must Keep</th>
+                    </tr>
+                </thead>
+                <tbody id="table-body">
+                </tbody>
             </table>
-          </div>
         </div>
-
-        {/* CSM Workload Summary */}
-        <div className="mt-6 bg-white rounded-lg shadow p-6">
-          <h2 className="text-lg font-medium text-gray-900 mb-4">CSM Workload Summary</h2>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-            {Object.entries(csmWorkload)
-              .filter(([_, data]) => data.count > 0)
-              .sort((a, b) => b[1].totalARR - a[1].totalARR)
-              .map(([csm, data]) => (
-                <div key={csm} className="border rounded-lg p-3">
-                  <p className="font-medium text-gray-900">{csm}</p>
-                  <p className="text-sm text-gray-600">
-                    {data.count} accounts • ${(data.totalARR / 1000).toFixed(0)}K ARR
-                  </p>
-                  <div className="mt-1 text-xs text-gray-500">
-                    {Object.entries(data.byCategory)
-                      .filter(([_, count]) => count > 0)
-                      .map(([cat, count]) => `${cat}: ${count}`)
-                      .join(' • ')}
-                  </div>
-                </div>
-              ))}
-          </div>
-        </div>
-      </div>
     </div>
-  );
-};
 
-export default CSMAssignmentTool;
+    <script>
+        // Generate the complete CSV data
+        async function generateCSVData() {
+            const response = await window.fs.readFile('GM FILES  download.csv', { encoding: 'utf8' });
+            const lines = response.split('\n');
+            const headers = lines[0].split(',').map(h => h.trim());
+            
+            const data = [];
+            for (let i = 1; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    const values = lines[i].split(',');
+                    const row = {};
+                    headers.forEach((header, index) => {
+                        row[header] = values[index] || '';
+                    });
+                    data.push(row);
+                }
+            }
+            
+            // CSM assignment rules
+            const csmByCategory = {
+                '$100K+': ['Jeremy Walker', 'Harris Rollo'],
+                '$50K-$99K': ['Leslie Trejo', 'Laura McAdams'],
+                '$20K-$49K': ['Joseph Velatini', 'Megan Taylor', 'Kristin Guarente'],
+                '<$19K': ['Carly Blair', 'New Hire']
+            };
+            
+            // Track load
+            const load = {};
+            Object.values(csmByCategory).flat().forEach(csm => { load[csm] = 0; });
+            
+            // Process assignments
+            const assignments = data.map(row => {
+                const category = row['Category'];
+                const currentCSM = row['Current CSM'];
+                const mustKeep = ['yes', 'Yes', 'YES'].includes(row['Must Keep']);
+                const eligible = csmByCategory[category] || [];
+                
+                let newCSM = currentCSM;
+                let changeRequired = 'No';
+                let reason = '';
+                
+                if (mustKeep) {
+                    reason = 'Must Keep - Retained with current CSM';
+                    if (eligible.includes(currentCSM)) load[currentCSM]++;
+                } else if (eligible.includes(currentCSM)) {
+                    reason = 'Already assigned to eligible CSM';
+                    load[currentCSM]++;
+                } else {
+                    changeRequired = 'Yes';
+                    let minLoad = 999999;
+                    eligible.forEach(csm => {
+                        if (load[csm] < minLoad) {
+                            minLoad = load[csm];
+                            newCSM = csm;
+                        }
+                    });
+                    load[newCSM]++;
+                    reason = `Reassigned from ${currentCSM} to ${newCSM} (category requirement)`;
+                }
+                
+                return {
+                    'Account Name': row['Account Name'],
+                    'ARR': row['ARR'],
+                    'Segment': row['Segment'],
+                    'Category': category,
+                    'Current CSM': currentCSM,
+                    'New CSM': newCSM,
+                    'Change Required': changeRequired,
+                    'Must Keep': mustKeep ? 'Yes' : 'No',
+                    'Assignment Reason': reason
+                };
+            });
+            
+            return assignments;
+        }
+        
+        // Create CSV string from data
+        function createCSV(data) {
+            const headers = ['Account Name', 'ARR', 'Segment', 'Category', 'Current CSM', 'New CSM', 'Change Required', 'Must Keep', 'Assignment Reason'];
+            const csvRows = [headers.join(',')];
+            
+            data.forEach(row => {
+                const values = headers.map(header => {
+                    const value = row[header] || '';
+                    return value.includes(',') ? `"${value}"` : value;
+                });
+                csvRows.push(values.join(','));
+            });
+            
+            return csvRows.join('\n');
+        }
+        
+        // Download CSV file
+        function downloadCSV() {
+            generateCSVData().then(data => {
+                const csv = createCSV(data);
+                const blob = new Blob([csv], { type: 'text/csv' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'CSM_Account_Assignments.csv';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+            });
+        }
+        
+        // Load and display preview
+        generateCSVData().then(data => {
+            // Update statistics
+            document.getElementById('total').textContent = data.length;
+            document.getElementById('changes').textContent = data.filter(d => d['Change Required'] === 'Yes').length;
+            document.getElementById('mustkeep').textContent = data.filter(d => d['Must Keep'] === 'Yes').length;
+            document.getElementById('nochange').textContent = data.filter(d => d['Change Required'] === 'No').length;
+            
+            // Display preview
+            const tbody = document.getElementById('table-body');
+            data.slice(0, 50).forEach(row => {
+                const tr = document.createElement('tr');
+                if (row['Change Required'] === 'Yes') tr.classList.add('change-yes');
+                if (row['Must Keep'] === 'Yes') tr.classList.add('must-keep');
+                
+                tr.innerHTML = `
+                    <td>${row['Account Name']}</td>
+                    <td>${row['ARR']}</td>
+                    <td>${row['Category']}</td>
+                    <td>${row['Current CSM']}</td>
+                    <td>${row['New CSM']}</td>
+                    <td>${row['Change Required']}</td>
+                    <td>${row['Must Keep']}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        });
+    </script>
+</body>
+</html>
